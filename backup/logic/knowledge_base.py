@@ -17,11 +17,6 @@ class KnowledgeBase:
         with open(self.file_path, 'r') as f:
             return json.load(f)
 
-    def save_all(self, data):
-        """Save the entire list of prospects (used for bulk edits)."""
-        with open(self.file_path, 'w') as f:
-            json.dump(data, f, indent=2)
-
     def save_prospect(self, profile_data, messages=None, url=""):
         """
         Save a prospect with full profile, generated messages, URL, and timestamp.
@@ -88,22 +83,10 @@ class KnowledgeBase:
             p_role = p.get("role", "").lower()
             p_industry = p.get("industry", "").lower()
             
-            # === UNIVERSAL: Company Match (Fuzzy) ===
-            # Handle variations like "TCS" vs "Tata Consultancy Services"
-            if company:
-                c_norm = company.lower().strip()
-                p_norm = p_company.strip()
-                print(f"[DEBUG_KB] Comparing '{c_norm}' vs '{p_norm}'")
-                
-                if len(c_norm) > 3 and len(p_norm) > 3:
-                     if c_norm == p_norm or c_norm in p_norm or p_norm in c_norm:
-                        score += 5 # Boosted score for strong match
-                        reasons.append("same_company")
-                        print(f"[DEBUG_KB] Matched! Score +5 (reasons: {reasons})")
-                elif c_norm == p_norm:
-                    score += 5
-                    reasons.append("same_company")
-                    print(f"[DEBUG_KB] Matched! Score +5 (reasons: {reasons})")
+            # === UNIVERSAL: Exact company match is always valuable ===
+            if company and p_company == company.lower():
+                score += 4
+                reasons.append("same_company")
             
             # === OFFERING-SPECIFIC SCORING ===
             if offering_type == "bootcamp":
@@ -173,15 +156,7 @@ class KnowledgeBase:
         
         # Sort by score descending
         scored.sort(key=lambda x: x[0], reverse=True)
-        
-        # EXCLUSIVE: If same_company match exists, return ONLY those to avoid mixing context
-        same_company_matches = [item for item in scored if "same_company" in item[1]]
-        if same_company_matches:
-            return [item[2] for item in same_company_matches]
-
-        # STRICT MODE: If no company match, return NOTHING (0 matches).
-        # This prevents cross-company role confusion.
-        return []
+        return [item[2] for item in scored[:3]]
 
     def _detect_offering_type(self, offering):
         """

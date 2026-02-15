@@ -5,7 +5,7 @@ import logging
 import os
 import time
 import re
-import altair as alt
+import altair as alt  # For Analytics
 from logic.ingestion import ResumeParser, WebScraper
 from logic.analyzer import ProspectAnalyzer
 from logic.generator import MessageGenerator
@@ -49,7 +49,7 @@ st.markdown("""
 # Sidebar
 with st.sidebar:
     st.header("⚙️ Configuration")
-    llm_url = st.text_input("Kaggle Endpoint URL", value="https://aabb-34-26-185-21.ngrok-free.app")
+    llm_url = st.text_input("Kaggle Endpoint URL", value="https://3944-34-187-196-159.ngrok-free.app")
     
     if st.button("Test Connection"):
         try:
@@ -94,8 +94,11 @@ with tab1:
     
     if input_method == "LinkedIn URL":
         url = st.text_input("Enter LinkedIn Profile URL")
+        github_url = st.text_input("GitHub URL (Optional)")
         process_btn = st.button("Analyze Profile")
+        
         if process_btn and url:
+            # 1. Scrape LinkedIn
             with st.spinner("Scraping LinkedIn (this may take a moment)..."):
                 scraper = WebScraper()
                 raw_text = scraper.scrape_url(url)
@@ -104,6 +107,23 @@ with tab1:
                     st.text_area("Scraped Content (Debug)", raw_text, height=100)
                 else:
                     st.success("Profile scraped successfully!")
+            
+            # 2. Scrape GitHub (if provided)
+            if github_url:
+                with st.spinner("Scanning GitHub projects..."):
+                    try:
+                        from logic.ingestion import GitHubScraper
+                        gh_scraper = GitHubScraper()
+                        projects = gh_scraper.scrape_user_projects(github_url, limit=1)
+                        if projects:
+                            st.success(f"Found latest project: {projects[0]['name']}")
+                            st.session_state.github_projects = projects # Persist for generator
+                            
+                            raw_text += "\n\n[GitHub Projects Data]\n"
+                            for p in projects:
+                                raw_text += f"- Project Name: {p['name']}\n  Description/README: {p['description']}\n"
+                    except Exception as e:
+                        st.error(f"GitHub Error: {e}")
 
     elif input_method == "Upload Resume/File":
         uploaded_file = st.file_uploader("Upload PDF or DOCX", type=["pdf", "docx"])
@@ -150,6 +170,14 @@ with tab1:
             
             with st.spinner("Analyzing Psychological Profile & Communication Style..."):
                 analysis = analyzer.analyze_profile(raw_text)
+                
+                # INJECT GITHUB DATA IMMEDIATELY
+                if st.session_state.get("github_projects"):
+                     analysis["github_projects"] = st.session_state.github_projects
+                     # Append to key_insights for visibility
+                     if "key_insights" not in analysis: analysis["key_insights"] = []
+                     analysis["key_insights"].append(f"Active on GitHub: {st.session_state.github_projects[0]['name']}")
+                
                 st.session_state.analysis_result = analysis
             
             # DEBUG: Show what we actually scraped to build trust
@@ -225,16 +253,10 @@ with tab1:
                 if "error" in display_msgs:
                     st.error(f"Generation Error: {display_msgs['error']}")
                 else:
-                    # Generate a unique suffix for keys based on the analysis ID or timestamp
-                    # We can use the prospect's name hash or a random token stored in session state
+                    # Generate a unique suffix for keys
                     if "gen_id" not in st.session_state:
                          import uuid
                          st.session_state.gen_id = str(uuid.uuid4())
-                    
-                    # Update gen_id if we just generated new content (we can check if this is a fresh run)
-                    # Actually, we set session_state.generated_messages in the logic block.
-                    # We should also set a new gen_id there. 
-                    # For now, let's just use a hash of the body content as part of the key to force update.
                     
                     c_email, c_li, c_wa, c_sms, c_insta = st.tabs(["Email", "LinkedIn", "WhatsApp", "SMS", "Instagram"])
                     
@@ -328,137 +350,37 @@ with tab2:
             scraper = WebScraper()
             
             total_rows = len(df)
-            
-            # Use larger delays for big batches
             import random
             base_delay = 8 if total_rows > 10 else 5
             
-            # Helper: Check if a value is garbage (section markers, etc.)
+            # Helper: Check if a value is garbage
             def is_garbage(val):
-                """Return True if value looks like scraping artifact, not real data."""
-                if not val or val == "Unknown":
-                    return True
+                if not val or val == "Unknown": return True
                 v = val.strip()
-                if "===" in v:
-                    return True
-                if v.isdigit():
-                    return True
-                if len(v) < 2:
-                    return True
+                if "===" in v: return True
+                if v.isdigit(): return True
+                if len(v) < 2: return True
                 return False
 
-            # Helper: Sanitize a field (remove multi-line junk)
+            # Helper: Sanitize a field
             def sanitize_field(value):
-                """Clean a field value: take only meaningful content."""
-                if not value or value == "Unknown":
-                    return "Unknown"
+                if not value or value == "Unknown": return "Unknown"
                 val = str(value)
-                # Always normalize: replace literal 2-char \n with real newline
                 val = val.replace(chr(92) + 'n', chr(10))
                 lines = [l.strip() for l in val.split(chr(10)) if l.strip()]
-                if not lines:
-                    return "Unknown"
-                # Filter out garbage lines
+                if not lines: return "Unknown"
                 clean_lines = [l for l in lines if not is_garbage(l)]
-                if not clean_lines:
-                    return lines[-1] if lines else "Unknown"
-                if len(clean_lines) == 1:
-                    return clean_lines[0]
-                return clean_lines[-1]
+                if not clean_lines: return lines[-1] if lines else "Unknown"
+                return clean_lines[0] if len(clean_lines) == 1 else clean_lines[-1]
             
-            # Hallucination markers from the example prompts
+            # Hallucination markers
             EXAMPLE_MARKERS = ["sarah jones", "sarah", "cloudscale"]
             
-            # Role keywords for field validation
-            ROLE_KEYWORDS = [
-                "developer", "engineer", "manager", "designer", "analyst", 
-                "architect", "lead", "director", "vp", "intern", "student", 
-                "consultant", "founder", "cto", "ceo", "scientist", 
-                "specialist", "coordinator", "administrator", "associate", 
-                "officer", "joiner", "trainee", "executive"
-            ]
-            
-            def looks_like_role(text):
-                """Returns True if text contains role-like keywords."""
-                return any(kw in text.lower() for kw in ROLE_KEYWORDS)
-            
-            def looks_like_name(text):
-                """Returns True if text looks like a person name (2-3 capitalized words, no role keywords)."""
-                words = text.strip().split()
-                if len(words) < 1 or len(words) > 5:
-                    return False
-                if looks_like_role(text):
-                    return False
-                # Most words should be capitalized
-                cap_count = sum(1 for w in words if w[0].isupper())
-                return cap_count >= len(words) * 0.5
-            
-            def check_msg_hallucination(msgs_dict):
-                """Return True if messages reference the example profile."""
-                if not msgs_dict:
-                    return False
-                all_text = json.dumps(msgs_dict).lower()
-                return any(marker in all_text for marker in EXAMPLE_MARKERS)
-            
-            def extract_name_from_url(url):
-                """Extract a name from the LinkedIn URL slug."""
-                url_match = re.search(r'linkedin\.com/in/([^/]+)', url)
-                if url_match:
-                    slug = url_match.group(1)
-                    # Remove trailing hash/ID (e.g., '-40842a1a2')
-                    slug = re.sub(r'-[a-f0-9]{5,}$', '', slug)
-                    slug = slug.replace('-', ' ').replace('/', '').strip()
-                    # Remove any remaining trailing digits
-                    slug = re.sub(r'\d+$', '', slug).strip()
-                    if slug and len(slug) > 2:
-                        return slug.title()
-                return "Unknown"
-            
-            def extract_from_experience(cleaned_text):
-                """Extract name, role, company directly from Experience section text."""
-                hdr_name = "Unknown"
-                hdr_role = "Unknown"
-                hdr_company = "Unknown"
-                
-                # Name: first line after any section marker
-                for marker in ["=== EXPERIENCE ===", "=== EDUCATION ===", "=== SKILLS ==="]:
-                    match = re.search(re.escape(marker) + r'\s*\n\s*(.+)', cleaned_text)
-                    if match:
-                        candidate = match.group(1).strip()
-                        if candidate and not is_garbage(candidate) and candidate not in ("Experience", "Education", "Skills", "Licenses & certifications"):
-                            hdr_name = candidate
-                            break
-                
-                # Company and Role: look for "Company · Full-time/Part-time/Internship" pattern
-                exp_start = cleaned_text.find("=== EXPERIENCE ===")
-                if exp_start >= 0:
-                    exp_text = cleaned_text[exp_start:exp_start+1500]
-                    company_match = re.search(
-                        r'([A-Za-z0-9][A-Za-z0-9\s&.,\'\-]+?)\s*·\s*(?:Full-time|Part-time|Internship|Contract|Freelance|Apprenticeship)',
-                        exp_text
-                    )
-                    if company_match:
-                        hdr_company = company_match.group(1).strip()
-                    
-                    # Role: line immediately before the company line
-                    exp_lines = exp_text.split('\n')
-                    for i, eline in enumerate(exp_lines):
-                        if '·' in eline and any(t in eline for t in ['Full-time', 'Part-time', 'Internship', 'Contract', 'Freelance', 'Apprenticeship']):
-                            if i > 0:
-                                role_candidate = exp_lines[i-1].strip()
-                                if role_candidate and not is_garbage(role_candidate) and role_candidate != "Experience":
-                                    hdr_role = role_candidate
-                            break
-                
-                return hdr_name, hdr_role, hdr_company
-            
             def process_profile(scraper, analyzer, generator, target_url, my_offering, status_text, idx, total):
-                """Process a single profile. Returns a result dict."""
                 status_text.text(f"Processing ({idx+1}/{total}): {target_url}...")
                 
                 # 1. Scrape
                 raw_text = scraper.scrape_url(target_url)
-                
                 if "Auth Wall" in raw_text:
                     time.sleep(5)
                     raw_text = scraper.scrape_url(target_url)
@@ -467,182 +389,45 @@ with tab2:
                 cleaned_text = scraper._filter_noise(raw_text)
                 
                 # 3. Failure detection
-                has_useful_content = len(cleaned_text.strip()) > 50
-                is_auth_wall = "Auth Wall" in raw_text
-                is_error = raw_text.strip().startswith("Error")
-                
-                if is_error or is_auth_wall or not has_useful_content:
+                if raw_text.strip().startswith("Error") or "Auth Wall" in raw_text or len(cleaned_text.strip()) < 50:
                     return {
                         "URL": target_url, "Name": "", "Company": "", "Role": "",
-                        "Email Subject": "", "Email Body": "", "LinkedIn Msg": "",
-                        "WhatsApp Msg": "", "SMS Msg": "",
-                        "Status": "Failed to Scrape", "Data": cleaned_text[:200]
+                        "Status": "Failed to Scrape"
                     }
                 
                 # 4. Analyze with Retry
                 analysis = {}
-                analysis_error = None
-                
-                # Try up to 2 times
                 for attempt in range(2):
                     try:
                         analysis = analyzer.analyze_profile(cleaned_text)
-                        if "error" not in analysis:
-                            break
-                        analysis_error = analysis.get("error")
-                        status_text.text(f"Analysis failed (attempt {attempt+1}), retrying...")
+                        if "error" not in analysis: break
                         time.sleep(2)
-                    except Exception as e:
-                        analysis_error = str(e)
+                    except:
                         time.sleep(2)
                 
-                # If analysis failed completely
                 if not analysis or "error" in analysis:
-                    # Provide minimal fallback so we can at least save the scraped data
-                    analysis = {
-                        "name": "Unknown", 
-                        "company": "Unknown", 
-                        "role": "Unknown", 
-                        "error": str(analysis_error or "Analysis Failed")
-                    }
-                    msgs = {} # Skip generation
+                    msgs = {}
+                    status = "Failed Analysis"
+                    analysis = {"name": "Unknown", "company": "Unknown", "role": "Unknown"}
                 else:
-                    # 5. Query KB for similar prospects (social proof context)
                     similar = kb.find_similar(
                         company=analysis.get("company"),
                         industry=analysis.get("industry"),
                         role=analysis.get("role"),
                         offering=my_offering
                     )
-                    
-                    # 6. Generate messages with KB context
                     msgs = generator.generate_campaign(analysis, my_offering, context_prospects=similar)
                     
-                    # Check for empty messages and retry generation
-                    has_email = msgs and msgs.get("email", {}).get("body", "")
-                    has_linkedin = msgs and msgs.get("linkedin", "")
-                    
-                    if not has_email and not has_linkedin:
-                        status_text.text(f"Retrying message generation ({idx+1}/{total})...")
-                        time.sleep(5)
+                    if not msgs or (not msgs.get("email") and not msgs.get("linkedin")):
+                        time.sleep(2)
                         msgs = generator.generate_campaign(analysis, my_offering, context_prospects=similar)
 
-                has_email = msgs and msgs.get("email", {}).get("body", "")
-                has_linkedin = msgs and msgs.get("linkedin", "")
-                
-                # 6. Hallucination check for messages
-                if check_msg_hallucination(msgs):
-                    status_text.text(f"Detected example data in messages, regenerating ({idx+1}/{total})...")
-                    time.sleep(5)
-                    msgs = generator.generate_campaign(analysis, my_offering)
-                    has_email = msgs and msgs.get("email", {}).get("body", "")
-                    has_linkedin = msgs and msgs.get("linkedin", "")
-                    if check_msg_hallucination(msgs):
-                        msgs = {}
-                        has_email = False
-                        has_linkedin = False
-                
                 # 7. Extract & sanitize fields
                 name = sanitize_field(analysis.get("name") or "Unknown")
                 company = sanitize_field(analysis.get("company") or "Unknown")
                 role = sanitize_field(analysis.get("role") or "Unknown")
                 
-                if is_garbage(name): name = "Unknown"
-                if is_garbage(company): company = "Unknown"
-                if is_garbage(role): role = "Unknown"
-                
-                # Reject hallucinated example values
-                if name.lower() in EXAMPLE_MARKERS: name = "Unknown"
-                if company.lower() in EXAMPLE_MARKERS: company = "Unknown"
-                
-                # 7.5 URL-BASED NAME CROSS-VALIDATION
-                # If LLM name doesn't match URL slug at all, it came from sidebar
-                url_name = extract_name_from_url(target_url)
-                if name != "Unknown" and url_name != "Unknown":
-                    url_parts = set(url_name.lower().split())
-                    name_parts = set(name.lower().split())
-                    if not url_parts.intersection(name_parts):
-                        # Name is wrong - override from section header or URL
-                        hdr_name, hdr_role, hdr_company = extract_from_experience(cleaned_text)
-                        name = hdr_name if hdr_name != "Unknown" else url_name
-                        # Company/role also likely wrong - override if we found better
-                        if hdr_company != "Unknown":
-                            company = hdr_company
-                        if hdr_role != "Unknown":
-                            role = hdr_role
-                
-                # 8. FIELD CROSS-VALIDATION
-                # If company looks like a role title
-                if company != "Unknown" and looks_like_role(company):
-                    if role == "Unknown":
-                        role = company
-                        company = "Unknown"
-                    elif not looks_like_role(role):
-                        role = company
-                        company = "Unknown"
-                    elif looks_like_name(role):
-                        # role is actually a name (e.g., "Nitish Chintakindi")
-                        if name == "Unknown":
-                            name = role
-                        role = company
-                        company = "Unknown"
-                
-                # If role looks like a person name, move to name
-                if role != "Unknown" and name == "Unknown" and looks_like_name(role):
-                    name = role
-                    role = "Unknown"
-                
-                # 9. REGEX FALLBACKS
-                if company == "Unknown" or role == "Unknown":
-                    # Pattern 1: "Role at Company"
-                    match = re.search(
-                        r'([A-Za-z\s\-/]+(?:Developer|Engineer|Manager|Designer|Analyst|Consultant|Architect|Intern|Student|Lead|Director|VP|Founder))\s+at\s+([A-Za-z0-9\s\-&.]+)',
-                        cleaned_text[:1000]
-                    )
-                    if match:
-                        if role == "Unknown": role = match.group(1).strip()
-                        if company == "Unknown": company = match.group(2).strip().split('\n')[0]
-                    
-                    # Pattern 2: "Role | Company"
-                    if company == "Unknown":
-                        match2 = re.search(r'([A-Za-z0-9\s\-]+)\s*\|\s*([A-Za-z0-9\s\-&.]+)', cleaned_text[:1000])
-                        if match2:
-                            if role == "Unknown": role = match2.group(1).strip()
-                            company = match2.group(2).strip().split('\n')[0]
-                    
-                    # Pattern 3: Role keywords
-                    if role == "Unknown":
-                        role_match = re.search(
-                            r'((?:Senior\s+|Junior\s+|Lead\s+|Full[\s-]?Stack\s+)?'
-                            r'(?:Software|Java|Python|Backend|Frontend|Web|Data|Cloud|DevOps|ML|AI|System|Network|QA|Test|Mobile|iOS|Android)\s+'
-                            r'(?:Developer|Engineer|Architect|Analyst|Scientist|Designer))',
-                            cleaned_text[:1000], re.IGNORECASE
-                        )
-                        if role_match:
-                            role = role_match.group(1).strip()
-                    
-                    # Pattern 4: Company from Experience section
-                    if company == "Unknown":
-                        exp_match = re.search(r'(?:EXPERIENCE|Experience).*?(?:at|·|-)\s*([A-Z][A-Za-z0-9\s&.]+?)(?:\n|$)', cleaned_text[:1500])
-                        if exp_match:
-                            company = exp_match.group(1).strip()
-                
-                # 10. Name fallback
-                if name == "Unknown":
-                    header_match = re.search(r'=== PROFILE HEADER ===\s*(.+)', cleaned_text)
-                    if header_match:
-                        candidate = header_match.group(1).strip().split('\n')[0]
-                        if not is_garbage(candidate) and candidate.lower() not in EXAMPLE_MARKERS:
-                            name = candidate
-                
-                if name == "Unknown":
-                    name = extract_name_from_url(target_url)
-                
-                # 11. Determine status
-                if has_email or has_linkedin:
-                    status = "Success"
-                else:
-                    status = "Partial - Messages Empty"
+                status = "Success" if msgs else "Partial - Messages Empty"
                 
                 return {
                     "URL": target_url, "Name": name, "Company": company, "Role": role,
@@ -655,114 +440,39 @@ with tab2:
                 }
 
             try:
-                # Initialize ONE browser session for the entire batch
-                status_text.text("Initializing browser session...")
                 scraper.init_browser()
-                
-                # === MAIN PASS ===
                 for i, row in df.iterrows():
                     target_url = row[url_col]
-                    
-                    # Randomized delay to avoid rate limiting
-                    if i > 0:
-                        delay = random.uniform(base_delay, base_delay + 4)
-                        status_text.text(f"Waiting {delay:.0f}s before next profile...")
-                        time.sleep(delay)
-
                     try:
                         result = process_profile(scraper, analyzer, generator, target_url, my_offering, status_text, i, total_rows)
                         results.append(result)
                     except Exception as e:
-                        results.append({
-                            "URL": target_url, "Name": "", "Company": "", "Role": "",
-                            "Email Subject": "", "Email Body": "", "LinkedIn Msg": "",
-                            "WhatsApp Msg": "", "SMS Msg": "",
-                            "Status": f"Error: {str(e)}", "Data": ""
-                        })
-                    
+                        results.append({"URL": target_url, "Status": f"Error: {str(e)}"})
                     progress_bar.progress((i + 1) / total_rows)
-                
-                # === RETRY PASS: Re-attempt failed / partial profiles ===
-                failed_indices = [j for j, r in enumerate(results) 
-                                  if r.get("Status", "").startswith(("Partial", "Failed", "Error"))]
-                
-                if failed_indices:
-                    status_text.text(f"Retrying {len(failed_indices)} failed/partial profiles...")
-                    time.sleep(3)
-                    
-                    for retry_idx, orig_idx in enumerate(failed_indices):
-                        target_url = results[orig_idx]["URL"]
-                        status_text.text(f"Retry ({retry_idx+1}/{len(failed_indices)}): {target_url}...")
-                        
-                        # Longer delay for retry pass
-                        delay = random.uniform(10, 15)
-                        time.sleep(delay)
-                        
-                        try:
-                            retry_result = process_profile(
-                                scraper, analyzer, generator, target_url, my_offering, 
-                                status_text, retry_idx, len(failed_indices)
-                            )
-                            # Only replace if retry is better
-                            retry_status = retry_result.get("Status", "")
-                            orig_status = results[orig_idx].get("Status", "")
-                            
-                            if retry_status == "Success":
-                                results[orig_idx] = retry_result
-                            elif retry_status.startswith("Partial") and orig_status.startswith(("Failed", "Error")):
-                                results[orig_idx] = retry_result
-                        except Exception:
-                            pass  # Keep original result
                         
             finally:
                 scraper.close_browser()
                 
             status_text.text("Batch Processing Complete!")
             
-            # Auto-save successful profiles to Knowledge Base
+            # Auto-save
             saved_count = 0
             for r in results:
                 if r.get("Status") == "Success" and r.get("Name") and r.get("Name") != "Unknown":
-                    profile_for_kb = {
-                        "name": r.get("Name", ""),
-                        "company": r.get("Company", ""),
-                        "role": r.get("Role", ""),
-                    }
-                    msgs_for_kb = {
-                        "email": {"subject": r.get("Email Subject", ""), "body": r.get("Email Body", "")},
-                        "linkedin": r.get("LinkedIn Msg", ""),
-                        "whatsapp": r.get("WhatsApp Msg", ""),
-                        "sms": r.get("SMS Msg", ""),
-                    }
-                    kb.save_prospect(profile_for_kb, messages=msgs_for_kb, url=r.get("URL", ""))
+                    profile_for_kb = {"name": r.get("Name"), "company": r.get("Company"), "role": r.get("Role")}
+                    msgs_for_kb = {"email": {"subject": r.get("Email Subject"), "body": r.get("Email Body")}, "linkedin": r.get("LinkedIn Msg")}
+                    kb.save_prospect(profile_for_kb, messages=msgs_for_kb, url=r.get("URL"))
                     saved_count += 1
             
-            # Show Results
             if results:
                 res_df = pd.DataFrame(results)
                 st.dataframe(res_df)
-                
-                # Summary stats
-                success_count = sum(1 for r in results if r.get("Status") == "Success")
-                partial_count = sum(1 for r in results if r.get("Status", "").startswith("Partial"))
-                failed_count = total_rows - success_count - partial_count
-                st.info(f"✅ {success_count} Success | ⚠️ {partial_count} Partial | ❌ {failed_count} Failed")
-                if saved_count > 0:
-                    st.success(f"📚 Auto-saved {saved_count} successful profiles to Knowledge Base")
-                
-                # Download
-                csv = res_df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="Download Results as CSV",
-                    data=csv,
-                    file_name='outreach_results.csv',
-                    mime='text/csv',
-                )
+                if saved_count > 0: st.success(f"📚 Auto-saved {saved_count} profiles")
+                st.download_button("Download CSV", res_df.to_csv(index=False).encode('utf-8'), "results.csv", "text/csv")
 
 with tab3:
     st.subheader("📚 Knowledge Base")
     
-    # Stats
     stats = kb.get_stats()
     col_s1, col_s2, col_s3 = st.columns(3)
     col_s1.metric("Total Prospects", stats["total"])
@@ -771,10 +481,12 @@ with tab3:
     
     data = kb.load_all()
     if data:
-        # Display as a clean table
-        # Display as an editable table
         display_data = []
         for p in data:
+            # Calculate word count for email
+            email_body = p.get("messages", {}).get("email", {}).get("body", "")
+            word_count = len(email_body.split()) if email_body else 0
+            
             display_data.append({
                 "id": p.get("id", ""), 
                 "Name": p.get("name", "Unknown"),
@@ -784,7 +496,7 @@ with tab3:
                 "Status": p.get("status", "Sent"),
                 "Saved": p.get("timestamp", "")[:10] if p.get("timestamp") else "",
                 "Has Messages": "✅" if p.get("messages") else "❌",
-                "Email Words": len(p.get("messages", {}).get("email", {}).get("body", "").split()) if p.get("messages", {}).get("email", {}).get("body") else 0
+                "Email Words": word_count
             })
         
         kb_df = pd.DataFrame(display_data)
@@ -803,12 +515,12 @@ with tab3:
             "Email Words": st.column_config.NumberColumn("Email Words", help="Email body word count")
         }
         
-        st.info("💡 Pro Tip: You can edit the **Status** directly in the table below!")
+        st.info("💡 Pro Tip: Edit the **Status** column directly in the table to update analytics!")
         
         edited_df = st.data_editor(
             kb_df,
             column_config=column_config,
-            disabled=["Name", "Company", "Role", "Industry", "Saved", "Has Messages"],
+            disabled=["Name", "Company", "Role", "Industry", "Saved", "Has Messages", "Email Words"],
             use_container_width=True,
             hide_index=True,
             key="kb_editor"
@@ -849,26 +561,8 @@ with tab3:
                     kb.delete_prospect(prospect_id)
                     st.success(f"Deleted: {selected}")
                     st.rerun()
-        # View details
-        with st.expander("🔍 View Prospect Details"):
-            names_for_view = [f"{p.get('name', 'Unknown')} — {p.get('company', '')}" for p in data]
-            selected_view = st.selectbox("Select prospect to view", names_for_view, key="view_select")
-            view_idx = names_for_view.index(selected_view)
-            prospect = data[view_idx]
-            
-            st.json(prospect.get("profile", {}))
-            
-            saved_msgs = prospect.get("messages", {})
-            if saved_msgs:
-                st.markdown("**Saved Messages:**")
-                if saved_msgs.get("email"):
-                    st.text_area("Email", value=f"Subject: {saved_msgs['email'].get('subject', '')}\n\n{saved_msgs['email'].get('body', '')}", height=150, key=f"kb_email_{view_idx}")
-                if saved_msgs.get("linkedin"):
-                    st.text_area("LinkedIn", value=saved_msgs["linkedin"], height=100, key=f"kb_li_{view_idx}")
-                if saved_msgs.get("whatsapp"):
-                    st.text_area("WhatsApp", value=saved_msgs["whatsapp"], height=100, key=f"kb_wa_{view_idx}")
-        
-        # Practice Mode
+
+        # Practice Mode (Simulate Reply)
         st.divider()
         with st.expander("🤖 Practice Mode (Simulate Reply)"):
             st.info("Roleplay with the AI to test your messaging!")
@@ -899,30 +593,28 @@ with tab3:
                         # Use global llm_url from sidebar
                         client = KaggleClient(base_url=llm_url)
                         
-                        # Construct Prompt
                         prompt = f"""
-                        [Roleplay Task]
+                        [ROLEPLAY SIMULATION]
                         You are {p_data.get('name')}, {p_data.get('role')} at {p_data.get('company')}.
-                        Your background summary: {p_data.get('summary')}
                         
-                        You just received this cold outreach message:
-                        ---
-                        {user_msg}
-                        ---
+                        SCENARIO: You just received this cold email:
+                        "{user_msg}"
                         
-                        Task: Write a realistic email reply.
-                        Your current mood is {tone}.
-                        Keep it short (under 50 words) and authentic to a busy professional.
-                        Do not include subject line, just the body.
-                        If you are busy/skeptical, be brief or dismissive.
-                        If interested, ask a relevant follow-up question.
+                        YOUR TASK: Write ONLY the email reply body.
+                        Tone: {tone}
+                        Length: Under 50 words.
+                        
+                        CONSTRAINTS:
+                        - Do NOT write "Here is a reply" or "Option 1".
+                        - Do NOT offer multiple choices.
+                        - Do NOT include a subject line.
+                        - JUST write the reply text as if you hit 'Reply' and typed it.
                         """
                         
                         reply = client.generate(prompt, max_new_tokens=150)
                         
                         st.markdown(f"**📩 Reply from {p_data.get('name')}:**")
                         st.info(reply)
-
     else:
         st.info("No prospects saved yet. Process profiles to auto-populate the Knowledge Base.")
 
@@ -993,7 +685,7 @@ with tab4:
         df["is_reply"] = df["status"].isin(replied_statuses)
         
         with c1:
-            st.subheader("� Activity (Daily Volume)")
+            st.subheader("📅 Activity (Daily Volume)")
             
             if "timestamp" in df.columns:
                 try:
@@ -1030,4 +722,3 @@ with tab4:
                 st.caption("Does brevity lead to more replies?")
             else:
                 st.info("No email data to analyze.")
-

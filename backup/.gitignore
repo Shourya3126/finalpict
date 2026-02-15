@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+
+# App specific
+linkedin_cookies.pkl
+*.log
+debug_*.txt
+last_scraped_*.txt
+
+# Data
+knowledge_base.json
+*.csv
+!test_profiles.csv

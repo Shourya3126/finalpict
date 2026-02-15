@@ -1,0 +1,12 @@
+streamlit
+requests
+beautifulsoup4
+pdfplumber
+python-docx
+pandas
+selenium>=4.10.0
+# webdriver-manager # Removed as we use built-in Selenium Manager
+webdriver-manager
+fpdf
+webdriver-manager
+fpdf

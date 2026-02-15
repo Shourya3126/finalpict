@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 from logic.llm_client import KaggleClient
 
 class MessageGenerator:
-    def __init__(self, llm_url="https://3944-34-187-196-159.ngrok-free.app"):
+    def __init__(self, llm_url="https://edef-35-197-119-224.ngrok-free.app"):
         self.client = KaggleClient(base_url=llm_url)
 
     def generate_campaign(self, profile_data, my_offering, context_prospects=None, variant_mode=False):
@@ -17,9 +17,7 @@ class MessageGenerator:
         If variant_mode is True, generates an alternative "B" version.
         """
         
-        
         context_str = ""
-        forced_p_instruction = ""
         if context_prospects:
             company_raw = profile_data.get('company') if isinstance(profile_data, dict) else ''
             target_company = (company_raw or '').lower()
@@ -44,49 +42,43 @@ class MessageGenerator:
             
             parts = []
             
-            # TIER 0: MEETING BOOKED at Same Company (CRITICAL)
-            # Use same fuzzy logic as ingest
-            booked_refs = []
-            print(f"[DEBUG_GEN] Target Company: '{target_company}'")
-            for p in context_prospects:
-                if p.get('status') == 'Meeting Booked':
-                    p_c = p.get('company', '').lower().strip()
-                    t_c = target_company.strip()
-                    print(f"[DEBUG_GEN] Checking Booked: '{p_c}' vs '{t_c}'")
-                    if p_c == t_c or (len(p_c) > 3 and (p_c in t_c or t_c in p_c)):
-                        booked_refs.append(p)
-                        print(f"[DEBUG_GEN] Match found! {p['name']}")
-            
-            # TIER 0: MEETING BOOKED
-            # ... (booked_refs logic exists above) ...
-            
-            forced_p_instruction = ""
-            
-            if booked_refs:
-                ref = booked_refs[0]
-                print(f"[DEBUG_GEN] Using Tier 0: {ref['name']}")
-                parts.append(
-                    f"CRITICAL SOCIAL PROOF (MUST USE): Reference: {ref['name']} (Role: {ref['role']}, Company: {ref['company']} - VERIFIED MATCH - SAME COMPANY). "
-                    f"Action: They have ALREADY booked a meeting/are engaging with us. "
-                    f"Phrasing: 'I'm chatting with {ref['name']} from your team...' or 'Your colleague {ref['name']} suggested I reach out...'."
-                )
-                forced_p_instruction = f"CRITICAL REQUIREMENT: You MUST include the reference to {ref['name']} who has already booked a meeting. START YOUR MESSAGE WITH THIS CONTEXT."
-            
-            # TIER 1: Same company
-            elif direct_refs:
+            # TIER 1: Same company = must reference
+            if direct_refs:
                 ref = direct_refs[0]
-                print(f"[DEBUG_GEN] Using Tier 1: {ref['name']}")
                 parts.append(
-                    f"DIRECT REFERENCE (USE THIS): Reference: {ref['name']} (Role: {ref['role']}, Company: {ref['company']} - VERIFIED MATCH - SAME COMPANY). "
-                    f"Action: I recently contacted them and they showed interest. "
-                    f"Phrasing: 'I recently reached out to {ref['name']} from your team...' or 'Your colleague {ref['name']} is also exploring this...'."
+                    f"DIRECT REFERENCE (USE THIS): We previously worked with "
+                    f"{ref['name']} ({ref['role']}) at {ref['company']}. "
+                    f"You MUST naturally mention this in email and LinkedIn — e.g., "
+                    f"'We recently collaborated with {ref['name']} from your team at {ref['company']}...' or "
+                    f"'Your colleague {ref['name']} already uses our solution...'. "
+                    f"Keep it warm and natural."
                 )
-                forced_p_instruction = f"CRITICAL REQUIREMENT: You MUST mention that we recently contacted {ref['name']} from their team. This creates necessary social proof."
             
-
-            # "Otherwise dont" -> Do not use peer/industry proof if no direct match.
-            else:
-                pass
+            # TIER 2: Same career stage / college = peer reference (bootcamp-style)
+            if peer_refs:
+                names = [f"{p['name']} ({p['company']})" if p['company'] and p['company'] != 'Unknown' 
+                         else p['name'] for p in peer_refs]
+                names_str = ", ".join(names)
+                parts.append(
+                    f"PEER REFERENCE (USE THIS): Students/professionals at a similar stage — "
+                    f"{names_str} — have already benefited from our offering. "
+                    f"You should reference this naturally — e.g., "
+                    f"'Your batchmate {peer_refs[0]['name']} recently joined our program...' or "
+                    f"'Students from {peer_refs[0].get('company', 'your college')} have found success with us...'. "
+                    f"Make it feel relatable, like a peer recommendation."
+                )
+            
+            # TIER 3: Same industry / similar role = soft reference
+            if industry_refs:
+                names = [f"{p['name']} ({p['role']} at {p['company']})" for p in industry_refs 
+                         if p['company'] and p['company'] != 'Unknown']
+                if names:
+                    names_str = ", ".join(names)
+                    parts.append(
+                        f"SOFT REFERENCE (optional): Professionals in similar roles — "
+                        f"{names_str} — have connected with us. "
+                        f"Mention subtly if relevant, e.g., 'Engineers at {industry_refs[0]['company']} have used our platform...'."
+                    )
             
             if parts:
                 context_str = "\nSOCIAL PROOF FROM KNOWLEDGE BASE:\n" + "\n".join(parts)
@@ -99,25 +91,16 @@ class MessageGenerator:
         You are a world-class SDR and Copywriter.
         Your task is to generate hyper-personalized outreach messages that feel warm and well-researched.
         
-        {variant_instruction}
-        
         OFFERING CONTEXT:
         "{my_offering}"
         
-        1. NO HALLUCINATION: Do NOT mention any company, role, or person unless EXPLICITLY provided in text.
-           - If a reference person's company is not stated, do NOT invent one (like "TCS"). Just say "from your industry".
-           - When mentioning a reference, ONLY state their role and company EXACTLY as provided. Do NOT add "now at X" or imply they work elsewhere.
-        2. EVIDENCE-BASED: You MUST explicitly mention at least 2 specific details from the prospect's profile (e.g., project content, specific skill, past role).
-           - Do not be vague. Mention the specific project name or technology.
-        3. GITHUB PRIORITY: If 'github_projects' or 'github_activity' is present, you MUST mention the specific project name and relate it to the offering.
-        4. SOCIAL PROOF ACCURACY:
-           - Use "recently contacted" or "reaching out to" for references unless instructed otherwise.
-           - Do NOT claim we "worked with" someone unless status is 'Client'.
-        5. INTEGRATION: Fluidly bridge the prospect's specific details with the offering. 
-           - Do NOT just paste the offering; explain *why* it matters to *them*.
-        6. TONE: Professional yet conversational.
-        7. CALL TO ACTION: Clear next step.
-        8. MESSAGE LENGTH: 4-5 lines minimum. No 1-liners.
+        CRITICAL RULES:
+        1. MESSAGE LENGTH: ALL platform messages (LinkedIn, WhatsApp, SMS, Instagram) MUST be 4-5 lines minimum (not counting greeting/signature).
+           - Each message should be comprehensive and compelling. Do NOT generate 1-liners.
+        2. NO FLUFF: Don't just list facts. Weave them into a narrative. 
+        3. INTEGRATION: You must fluidly bridge the prospect's specific details (pain points, recent activity) with the 'OFFERING CONTEXT'. Do not just paste the offering; explain *why* it matters to *them*.
+        4. TONE: Professional yet conversational.
+        5. CALL TO ACTION: Clear next step.
         {context_str}
         """
 
@@ -157,8 +140,6 @@ class MessageGenerator:
         
         REAL INPUT PROFILE:
         {json.dumps(profile_data, indent=2)}
-        
-        {forced_p_instruction}
         
         REAL JSON OUTPUT:
         """
