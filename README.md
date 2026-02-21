@@ -57,4 +57,6 @@ An advanced AI tool designed to automate and personalize cold outreach at scale.
 5. **Track**: Update status in the "Knowledge Base" tab and view results in "Analytics".
 
 ---
-*Built for the 2024 AI Hackathon Series.*
+This project is completely intended for demo and knowledge purpose
+
+
